@@ -467,6 +467,27 @@ impl BoneSet {
         }
     }
     
+    /// 按名称设置 IK 启用状态
+    pub fn set_ik_enabled_by_name(&mut self, ik_name: &str, enabled: bool) {
+        // 先找到匹配的 IK 解算器索引
+        let solver_idx = self.ik_solvers.iter().position(|solver| {
+            self.links.get(solver.bone_index)
+                .map(|bone| bone.name == ik_name)
+                .unwrap_or(false)
+        });
+        
+        if let Some(idx) = solver_idx {
+            self.ik_solvers[idx].enabled = enabled;
+        }
+    }
+    
+    /// 设置 IK 启用状态（按索引）
+    pub fn set_ik_enabled(&mut self, solver_index: usize, enabled: bool) {
+        if let Some(solver) = self.ik_solvers.get_mut(solver_index) {
+            solver.enabled = enabled;
+        }
+    }
+    
     // ========================================
     // 变换访问
     // ========================================

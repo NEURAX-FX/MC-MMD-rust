@@ -131,3 +131,21 @@ impl Default for CameraKeyframe {
         }
     }
 }
+
+/// IK 关键帧
+#[derive(Debug, Clone)]
+pub struct IkKeyframe {
+    /// 帧索引
+    pub frame_index: u32,
+    /// IK 名称
+    pub ik_name: String,
+    /// 是否启用
+    pub enabled: bool,
+}
+
+impl IkKeyframe {
+    /// 创建新的 IK 关键帧
+    pub fn new(frame_index: u32, ik_name: String, enabled: bool) -> Self {
+        Self { frame_index, ik_name, enabled }
+    }
+}

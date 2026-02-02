@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use super::bezier_curve::BezierCurveCache;
-use super::motion_track::{BoneMotionTrack, MorphMotionTrack, MotionTrack, BoneFrameTransform};
-use super::keyframe::{BoneKeyframe, MorphKeyframe};
+use super::motion_track::{BoneMotionTrack, MorphMotionTrack, IkMotionTrack, MotionTrack, BoneFrameTransform};
+use super::keyframe::{BoneKeyframe, MorphKeyframe, IkKeyframe};
 
 /// 动画数据
 #[derive(Debug, Clone)]
@@ -15,6 +15,8 @@ pub struct Motion {
     pub bone_tracks: HashMap<String, BoneMotionTrack>,
     /// Morph 动画轨道（Morph 名称 -> 轨道）
     pub morph_tracks: HashMap<String, MorphMotionTrack>,
+    /// IK 动画轨道（IK 名称 -> 轨道）
+    pub ik_tracks: HashMap<String, IkMotionTrack>,
     /// 贝塞尔曲线缓存
     bezier_cache: BezierCurveCache,
     /// 是否脏（已修改）
@@ -30,6 +32,7 @@ impl Motion {
         Self {
             bone_tracks: HashMap::new(),
             morph_tracks: HashMap::new(),
+            ik_tracks: HashMap::new(),
             bezier_cache: BezierCurveCache::new(),
             dirty: false,
         }
@@ -68,6 +71,29 @@ impl Motion {
             .or_insert_with(MorphMotionTrack::new)
             .insert_keyframe(keyframe);
         self.dirty = true;
+    }
+
+    /// 插入 IK 关键帧
+    pub fn insert_ik_keyframe(&mut self, name: &str, keyframe: IkKeyframe) {
+        self.ik_tracks
+            .entry(name.to_string())
+            .or_insert_with(IkMotionTrack::new)
+            .insert_keyframe(keyframe);
+        self.dirty = true;
+    }
+
+    /// 获取 IK 在指定帧的启用状态
+    pub fn is_ik_enabled(&self, name: &str, frame_index: u32) -> bool {
+        if let Some(track) = self.ik_tracks.get(name) {
+            track.is_enabled_at(frame_index)
+        } else {
+            true // 默认启用
+        }
+    }
+
+    /// 获取 IK 轨道名称列表
+    pub fn ik_track_names(&self) -> impl Iterator<Item = &String> {
+        self.ik_tracks.keys()
     }
 
     /// 查找骨骼关键帧

@@ -10,7 +10,7 @@ use super::interpolation::{
     coefficient, lerp_element_wise, lerp_f32, 
     BoneKeyframeInterpolation, KeyframeInterpolationPoint,
 };
-use super::keyframe::{BoneKeyframe, MorphKeyframe};
+use super::keyframe::{BoneKeyframe, MorphKeyframe, IkKeyframe};
 
 /// 骨骼帧变换结果
 #[derive(Debug, Clone, Copy)]
@@ -438,5 +438,49 @@ impl MotionTrack for MorphMotionTrack {
 
     fn max_frame_index(&self) -> u32 {
         self.keyframes.keys().last().copied().unwrap_or(0)
+    }
+}
+
+/// IK 动画轨道
+#[derive(Debug, Clone)]
+pub struct IkMotionTrack {
+    /// 关键帧映射（帧索引 -> 关键帧）
+    pub keyframes: BTreeMap<u32, IkKeyframe>,
+}
+
+impl IkMotionTrack {
+    pub fn new() -> Self {
+        Self {
+            keyframes: BTreeMap::new(),
+        }
+    }
+
+    /// 插入关键帧
+    pub fn insert_keyframe(&mut self, keyframe: IkKeyframe) -> Option<IkKeyframe> {
+        self.keyframes.insert(keyframe.frame_index, keyframe)
+    }
+
+    /// 查找指定帧的 IK 启用状态
+    pub fn is_enabled_at(&self, frame_index: u32) -> bool {
+        let mut enabled = true; // 默认启用
+        for (idx, kf) in &self.keyframes {
+            if *idx <= frame_index {
+                enabled = kf.enabled;
+            } else {
+                break;
+            }
+        }
+        enabled
+    }
+
+    /// 获取最大帧索引
+    pub fn max_frame_index(&self) -> u32 {
+        self.keyframes.keys().last().copied().unwrap_or(0)
+    }
+}
+
+impl Default for IkMotionTrack {
+    fn default() -> Self {
+        Self::new()
     }
 }

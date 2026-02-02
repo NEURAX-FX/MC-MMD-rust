@@ -130,7 +130,7 @@ public class MMDAnimManager {
         // 记录加载结果
         if (anim != 0) {
             sub.put(cacheKey, anim);
-            logger.debug("加载动画 '{}' 成功，来源: {}", animName, loadedFrom);
+            logger.info("加载动画 '{}' 成功，来源: {}", animName, loadedFrom);
         } else {
             logger.warn("未找到动画文件: {}", animName);
         }

@@ -14,7 +14,7 @@ use crate::skeleton::BoneManager;
 use crate::morph::MorphManager;
 
 use super::motion::Motion;
-use super::keyframe::{BoneKeyframe, MorphKeyframe};
+use super::keyframe::{BoneKeyframe, MorphKeyframe, IkKeyframe};
 use super::motion_track::BoneFrameTransform;
 
 /// VMD 文件头
@@ -86,7 +86,45 @@ impl VmdFile {
             motion.insert_morph_keyframe(&name, keyframe);
         }
 
-        // 跳过相机、光照等数据（我们只需要骨骼和 Morph）
+        // 尝试读取相机、光照、阴影和 IK 数据
+        // 这些数据可能不存在（较老的 VMD 文件）
+        if let Ok(camera_count) = reader.read_u32::<LittleEndian>() {
+            // 跳过相机数据 (每个 61 字节)
+            for _ in 0..camera_count {
+                let mut buf = [0u8; 61];
+                let _ = reader.read_exact(&mut buf);
+            }
+            
+            // 尝试读取光照数据
+            if let Ok(light_count) = reader.read_u32::<LittleEndian>() {
+                // 跳过光照数据 (每个 28 字节)
+                for _ in 0..light_count {
+                    let mut buf = [0u8; 28];
+                    let _ = reader.read_exact(&mut buf);
+                }
+                
+                // 尝试读取阴影数据（可能不存在）
+                if let Ok(shadow_count) = reader.read_u32::<LittleEndian>() {
+                    // 跳过阴影数据 (每个 9 字节)
+                    for _ in 0..shadow_count {
+                        let mut buf = [0u8; 9];
+                        let _ = reader.read_exact(&mut buf);
+                    }
+                    
+                    // 尝试读取 IK 数据
+                    if let Ok(ik_count) = reader.read_u32::<LittleEndian>() {
+                        for _ in 0..ik_count {
+                            if let Ok(ik_keyframes) = read_ik_keyframe(reader) {
+                                for keyframe in ik_keyframes {
+                                    let ik_name = keyframe.ik_name.clone();
+                                    motion.insert_ik_keyframe(&ik_name, keyframe);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             model_name,
@@ -185,6 +223,40 @@ fn read_morph_keyframe<R: Read>(reader: &mut R) -> Result<(String, MorphKeyframe
     Ok((name, keyframe))
 }
 
+/// 读取 IK 关键帧
+/// 每个 IK 帧包含帧索引、显示标志和多个 IK 信息
+fn read_ik_keyframe<R: Read>(reader: &mut R) -> Result<Vec<IkKeyframe>> {
+    // 帧索引
+    let frame_index = reader.read_u32::<LittleEndian>()
+        .map_err(|e| MmdError::VmdParse(format!("Failed to read IK frame index: {}", e)))?;
+    
+    // 显示标志 (1 字节)
+    let _show = reader.read_u8()
+        .map_err(|e| MmdError::VmdParse(format!("Failed to read IK show flag: {}", e)))?;
+    
+    // IK 信息数量
+    let ik_info_count = reader.read_u32::<LittleEndian>()
+        .map_err(|e| MmdError::VmdParse(format!("Failed to read IK info count: {}", e)))?;
+    
+    let mut keyframes = Vec::with_capacity(ik_info_count as usize);
+    
+    for _ in 0..ik_info_count {
+        // IK 名称 (20 字节)
+        let mut name_bytes = [0u8; 20];
+        reader.read_exact(&mut name_bytes)
+            .map_err(|e| MmdError::VmdParse(format!("Failed to read IK name: {}", e)))?;
+        let ik_name = decode_shift_jis(&name_bytes);
+        
+        // 启用标志 (1 字节)
+        let enabled = reader.read_u8()
+            .map_err(|e| MmdError::VmdParse(format!("Failed to read IK enable flag: {}", e)))? != 0;
+        
+        keyframes.push(IkKeyframe::new(frame_index, ik_name, enabled));
+    }
+    
+    Ok(keyframes)
+}
+
 /// 解码 Shift-JIS 字符串
 fn decode_shift_jis(bytes: &[u8]) -> String {
     // 找到第一个 null 字节
@@ -276,11 +348,9 @@ impl VmdAnimation {
                 let transform = self.motion.find_bone_transform(bone_name, frame_index, amount);
                 
                 if weight >= 1.0 {
-                    // 完全覆盖
                     bone_manager.set_bone_translation(bone_idx, transform.translation);
                     bone_manager.set_bone_rotation(bone_idx, transform.orientation);
                 } else if weight > 0.0 {
-                    // 混合
                     if let Some(bone) = bone_manager.get_bone(bone_idx) {
                         let blended_translation = bone.animation_translate.lerp(transform.translation, weight);
                         let blended_rotation = bone.animation_rotate.slerp(transform.orientation, weight);
@@ -303,6 +373,14 @@ impl VmdAnimation {
                     let blended = current + (morph_weight - current) * weight;
                     morph_manager.set_morph_weight(morph_idx, blended);
                 }
+            }
+        }
+        
+        // 应用 IK 启用/禁用状态
+        for ik_name in self.motion.ik_track_names() {
+            let enabled = self.motion.is_ik_enabled(ik_name, frame_index);
+            if weight >= 1.0 {
+                bone_manager.set_ik_enabled_by_name(ik_name, enabled);
             }
         }
     }
