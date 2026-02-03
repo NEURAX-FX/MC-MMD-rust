@@ -19,17 +19,17 @@ public class NativeFunc {
     private static final boolean isAndroid = new File("/system/build.prop").exists();
     private static final boolean isLinux = System.getProperty("os.name").toLowerCase().contains("linux");
     private static final boolean isWindows = System.getProperty("os.name").toLowerCase().contains("windows");
+    static final String libraryVersion = "Rust-20260125";
     private static final HashMap<runtimeUrlRes, String> urlMap = new HashMap<runtimeUrlRes, String>() {
         {
-            put(runtimeUrlRes.windows, "https://github.com/Gengorou-C/KAIMyEntitySaba/releases/download/Rust-20260125/mmd_engine.dll");
-            put(runtimeUrlRes.linux, "https://github.com/Gengorou-C/KAIMyEntitySaba/releases/download/Rust-20260125/libmmd_engine.so");
+            put(runtimeUrlRes.windows, "https://github.com/shiroha-233/MC-MMD-rust/releases/download/" + libraryVersion + "/mmd_engine.dll");
+            put(runtimeUrlRes.linux, "https://github.com/shiroha-233/MC-MMD-rust/releases/download/" + libraryVersion + "/libmmd_engine.so");
             put(runtimeUrlRes.android_arch64, "https://github.com.cnpmjs.org/asuka-mio/KAIMyEntitySaba/releases/download/crossplatform/KAIMyEntitySaba.so");
             put(runtimeUrlRes.android_arch64_libc, "https://github.com.cnpmjs.org/asuka-mio/KAIMyEntitySaba/releases/download/crossplatform/libc++_shared.so");
         }
     };
     private static volatile NativeFunc inst;
     private static final Object lock = new Object();
-    static final String libraryVersion = "Rust-20260125";
 
     public static NativeFunc GetInst() {
         if (inst == null) {
