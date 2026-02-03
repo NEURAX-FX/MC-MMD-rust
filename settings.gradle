@@ -53,7 +53,7 @@ dependencyResolutionManagement {
 		}
 	}
 }
-rootProject.name = '3d-skin'
+rootProject.name = 'mmdskin'
 // 包含子项目
 include 'common'
 include 'fabric'

@@ -7,6 +7,12 @@ architectury {
 	fabric()
 }
 
+loom {
+	mixin {
+		defaultRefmapName = "mmdskin-fabric-refmap.json"
+	}
+}
+
 configurations {
 	common
 	shadowCommon // Don't use shadow from the shadow plugin since it conflicts with Loom.
@@ -114,7 +120,7 @@ sourceSets {
             // Avoid JPMS split-package with shaded common (network package) in dev runtime
         }
         resources {
-            exclude 'assets/template-mod/lang/*.json'
+            exclude 'assets/mmdskin/lang/*.json'
             exclude 'pack.mcmeta'
         }
     }

@@ -9,7 +9,7 @@ architectury {
 
 loom {
     forge {
-        mixinConfig "skinlayers3d-common.mixins.json"
+        mixinConfig "mmdskin-forge.mixins.json"
     }
     runs {
         client {

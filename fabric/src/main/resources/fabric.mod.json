@@ -1,8 +1,8 @@
 {
 	"schemaVersion": 1,
-	"id": "skinlayers3d",
+	"id": "mmdskin",
 	"version": "${version}",
-	"name": "3D Skin Layers",
+	"name": "MMD Skin",
 	"description": "使用MMD模型替换Minecraft实体渲染的模组",
 	"authors": [
 		"shiroha233",
@@ -15,18 +15,18 @@
 		"sources": "https://github.com/shiroha233/3d-skin-layers"
 	},
 	"license": "MIT",
-	"icon": "assets/skinlayers3d/icon.png",
+	"icon": "assets/mmdskin/icon.png",
 	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"com.shiroha.skinlayers3d.fabric.SkinLayers3DFabric"
+			"com.shiroha.mmdskin.fabric.MmdSkinFabric"
 		],
 		"client": [
-			"com.shiroha.skinlayers3d.fabric.SkinLayers3DFabricClient"
+			"com.shiroha.mmdskin.fabric.MmdSkinFabricClient"
 		]
 	},
 	"mixins": [
-		"skinlayers3d-common.mixins.json"
+		"mmdskin-fabric.mixins.json"
 	],
 	"depends": {
 		"fabricloader": ">=0.15.0",
