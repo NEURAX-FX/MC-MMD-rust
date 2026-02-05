@@ -1,23 +1,91 @@
-name: Build Minecraft Mod
+name: Build & Release
 
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
-    paths:
-      - 'common/**'
-      - 'fabric/**'
-      - 'forge/**'
-      - 'build.gradle'
-      - 'settings.gradle'
-      - 'gradle.properties'
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
+  # ==================== Rust 原生库构建 ====================
+  build-rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Windows DLL
+        run: cargo build --release --manifest-path rust_engine/Cargo.toml
+      
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmd_engine-windows
+          path: rust_engine/target/release/mmd_engine.dll
+
+  build-rust-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Linux SO
+        run: cargo build --release --manifest-path rust_engine/Cargo.toml
+      
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmd_engine-linux
+          path: rust_engine/target/release/libmmd_engine.so
+
+  build-rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build macOS dylib (x86_64)
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo build --release --manifest-path rust_engine/Cargo.toml --target x86_64-apple-darwin
+      
+      - name: Build macOS dylib (aarch64)
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo build --release --manifest-path rust_engine/Cargo.toml --target aarch64-apple-darwin
+      
+      - name: Create Universal Binary
+        run: |
+          lipo -create \
+            rust_engine/target/x86_64-apple-darwin/release/libmmd_engine.dylib \
+            rust_engine/target/aarch64-apple-darwin/release/libmmd_engine.dylib \
+            -output libmmd_engine.dylib
+      
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmd_engine-macos
+          path: libmmd_engine.dylib
+
+  # ==================== Java 模组构建 ====================
+  build-java:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,15 +100,12 @@ jobs:
       
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
       
       - name: Build with Gradle
         run: ./gradlew build --no-daemon -x test
-        continue-on-error: false
       
       - name: Upload Fabric Mod
         uses: actions/upload-artifact@v4
@@ -62,29 +127,26 @@ jobs:
             !forge/build/libs/*-sources*.jar
           if-no-files-found: error
 
+  # ==================== 统一发布 ====================
   release:
-    needs: build
+    needs: [build-rust-windows, build-rust-linux, build-rust-macos, build-java]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
-      - name: Download Fabric artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: mmdskin-fabric
-          path: artifacts/fabric
-      
-      - name: Download Forge artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mmdskin-forge
-          path: artifacts/forge
+          path: artifacts
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/fabric/*.jar
-            artifacts/forge/*.jar
+            artifacts/mmdskin-fabric/*.jar
+            artifacts/mmdskin-forge/*.jar
+            artifacts/mmd_engine-windows/mmd_engine.dll
+            artifacts/mmd_engine-linux/libmmd_engine.so
+            artifacts/mmd_engine-macos/libmmd_engine.dylib
           generate_release_notes: true
