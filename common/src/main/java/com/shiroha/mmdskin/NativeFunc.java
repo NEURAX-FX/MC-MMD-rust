@@ -42,6 +42,19 @@ public class NativeFunc {
         }
         return inst;
     }
+    
+    private static final boolean isAndroid =
+        System.getProperty("java.vm.name").equalsIgnoreCase("Dalvik")
+     || System.getProperty("java.runtime.name", "").toLowerCase().contains("android");
+
+private static Path getNativeBaseDir() {
+    if (isAndroid && isArm64) {
+        // 硬编码 Android aarch64 调试目录
+        return Paths.get(System.getProperty("java.io.tmpdir"), "mmdskin");
+    }
+    // 其他平台维持原逻辑
+    return Paths.get(gameDirectory);
+}
 
     /**
      * 获取已释放库的版本（通过版本文件）
@@ -201,11 +214,37 @@ public class NativeFunc {
             return null;
         }
     }
+private void LoadLibrary(File file) {
+    if (isArm64 && isAndroid) {
+        try {
+            File targetDir = new File(
+                "/data/data/com.tungsten.fcl/cache/mmdskin-native"
+            );
+            targetDir.mkdirs();
 
-    private void LoadLibrary(File file) {
-        System.load(file.getAbsolutePath());
+            File target = new File(targetDir, file.getName());
+
+            
+            if (!target.exists() || target.length() != file.length()) {
+                Files.copy(
+                    file.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                );
+            }
+
+            System.load(target.getAbsolutePath());
+            return;
+        } catch (Exception e) {
+            throw new UnsatisfiedLinkError(
+                "Android native 重定向加载失败: " + e.getMessage()
+            );
+        }
     }
 
+    // 桌面 / 非 Android 维持原行为
+    System.load(file.getAbsolutePath());
+}
     private void Init() {
         String resourcePath;
         String fileName;
