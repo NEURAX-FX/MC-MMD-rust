@@ -1,0 +1,873 @@
+package com.shiroha.mmdskin;
+
+import java.io.File;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import net.minecraft.client.Minecraft;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public class NativeFunc {
+    public static final Logger logger = LogManager.getLogger();
+    private static final String gameDirectory = Minecraft.getInstance().gameDirectory.getAbsolutePath();
+    private static final boolean isLinux = System.getProperty("os.name").toLowerCase().contains("linux");
+    private static final boolean isWindows = System.getProperty("os.name").toLowerCase().contains("windows");
+    private static final boolean isMacOS = System.getProperty("os.name").toLowerCase().contains("mac");
+    private static final boolean isArm64;
+    static {
+        String arch = System.getProperty("os.arch").toLowerCase();
+        isArm64 = arch.contains("aarch64") || arch.contains("arm64");
+    }
+    static final String libraryVersion = "v1.0.0";
+    private static final String RELEASE_BASE_URL =
+        "https://github.com/shiroha-233/MC-MMD-rust/releases/download/" + libraryVersion + "/";
+    private static volatile NativeFunc inst;
+    private static final Object lock = new Object();
+
+    public static NativeFunc GetInst() {
+        if (inst == null) {
+            synchronized (lock) {
+                if (inst == null) {
+                    NativeFunc newInst = new NativeFunc();
+                    newInst.Init();
+                    inst = newInst;
+                }
+            }
+        }
+        return inst;
+    }
+    
+    private static final boolean isAndroid =
+        System.getProperty("java.vm.name").equalsIgnoreCase("Dalvik")
+     || System.getProperty("java.runtime.name", "").toLowerCase().contains("android");
+
+private static Path getNativeBaseDir() {
+    if (isAndroid && isArm64) {
+        // 硬编码 Android aarch64 调试目录
+        return Paths.get(System.getProperty("java.io.tmpdir"), "mmdskin");
+    }
+    // 其他平台维持原逻辑
+    return Paths.get(gameDirectory);
+}
+
+    /**
+     * 获取已释放库的版本（通过版本文件）
+     */
+    private String getInstalledVersion(String fileName) {
+        try {
+            Path versionPath = Paths.get(gameDirectory, fileName + ".version");
+            if (Files.exists(versionPath)) {
+                return Files.readString(versionPath).trim();
+            }
+        } catch (Exception e) {
+            logger.debug("读取版本文件失败: " + e.getMessage());
+        }
+        return null;
+    }
+    
+    /**
+     * 保存版本文件
+     */
+    private void saveInstalledVersion(String fileName, String version) {
+        try {
+            Path versionPath = Paths.get(gameDirectory, fileName + ".version");
+            Files.writeString(versionPath, version);
+        } catch (Exception e) {
+            logger.warn("保存版本文件失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 重命名旧库文件为 .old
+     */
+    private void renameOldLibrary(String fileName) {
+        try {
+            Path libPath = Paths.get(gameDirectory, fileName);
+            Path oldPath = Paths.get(gameDirectory, fileName + ".old");
+            if (Files.exists(libPath)) {
+                // 删除可能存在的旧 .old 文件
+                Files.deleteIfExists(oldPath);
+                Files.move(libPath, oldPath, StandardCopyOption.REPLACE_EXISTING);
+                logger.info("已将旧版本库重命名为: " + fileName + ".old");
+            }
+        } catch (Exception e) {
+            logger.warn("重命名旧库文件失败: " + e.getMessage());
+        }
+    }
+
+    private File extractNativeLibrary(String resourcePath, String fileName) {
+        try {
+            Path targetPath = Paths.get(gameDirectory, fileName);
+            File targetFile = targetPath.toFile();
+            
+            // 检查已安装版本
+            String installedVersion = getInstalledVersion(fileName);
+            
+            if (targetFile.exists() && libraryVersion.equals(installedVersion)) {
+                // 版本匹配，直接使用现有文件
+                logger.info("原生库版本匹配 (" + libraryVersion + ")，使用缓存: " + fileName);
+                return targetFile;
+            }
+            
+            // 版本不匹配或文件不存在，需要释放新版本
+            InputStream is = NativeFunc.class.getResourceAsStream(resourcePath);
+            if (is == null) {
+                logger.warn("内置原生库未找到: " + resourcePath);
+                return targetFile.exists() ? targetFile : null;
+            }
+            
+            if (targetFile.exists()) {
+                // 版本不匹配，重命名旧文件
+                logger.info("检测到版本变更: " + (installedVersion != null ? installedVersion : "未知") + " -> " + libraryVersion);
+                renameOldLibrary(fileName);
+            }
+            
+            // 释放新版本
+            Files.copy(is, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            is.close();
+            
+            // 保存版本文件
+            saveInstalledVersion(fileName, libraryVersion);
+            
+            logger.info("已从模组内置资源释放原生库: " + fileName + " (版本: " + libraryVersion + ")");
+            return targetFile;
+        } catch (Exception e) {
+            logger.error("提取原生库失败: " + resourcePath, e);
+            return null;
+        }
+    }
+
+    /**
+     * 从 GitHub Release 下载缺失的原生库
+     * @param downloadFileName Release 中的资产文件名（如 mmd_engine-windows-x64.dll）
+     * @param localFileName    本地保存的文件名（如 mmd_engine.dll）
+     */
+    private File downloadNativeLibrary(String downloadFileName, String localFileName) {
+        try {
+            Path targetPath = Paths.get(gameDirectory, localFileName);
+
+            // 已有版本匹配的文件，无需下载
+            String installedVersion = getInstalledVersion(localFileName);
+            if (targetPath.toFile().exists() && libraryVersion.equals(installedVersion)) {
+                logger.info("原生库版本匹配，使用已下载的缓存: " + localFileName);
+                return targetPath.toFile();
+            }
+
+            String urlStr = RELEASE_BASE_URL + downloadFileName;
+            logger.info("正在从 GitHub 下载原生库: " + urlStr);
+
+            // GitHub Release 会 302 重定向到 CDN，手动跟随重定向
+            HttpURLConnection conn = null;
+            for (int i = 0; i < 5; i++) {
+                conn = (HttpURLConnection) new URL(urlStr).openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(60000);
+                conn.setRequestProperty("User-Agent", "MMDSkin-Mod/" + libraryVersion);
+
+                int code = conn.getResponseCode();
+                if (code == HttpURLConnection.HTTP_MOVED_TEMP
+                        || code == HttpURLConnection.HTTP_MOVED_PERM
+                        || code == 307 || code == 308) {
+                    urlStr = conn.getHeaderField("Location");
+                    conn.disconnect();
+                    continue;
+                }
+                break;
+            }
+
+            if (conn == null || conn.getResponseCode() != 200) {
+                logger.warn("下载失败，HTTP 状态码: " + (conn != null ? conn.getResponseCode() : "无连接"));
+                return null;
+            }
+
+            long contentLength = conn.getContentLengthLong();
+            logger.info("开始下载，文件大小: " +
+                    (contentLength > 0 ? (contentLength / 1024) + " KB" : "未知"));
+
+            // 先下载到临时文件，完成后再移动，避免半成品文件
+            Path tempPath = Paths.get(gameDirectory, localFileName + ".download");
+            try (InputStream is = conn.getInputStream()) {
+                Files.copy(is, tempPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            // 旧文件存在时先重命名为 .old
+            if (Files.exists(targetPath)) {
+                renameOldLibrary(localFileName);
+            }
+
+            Files.move(tempPath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            saveInstalledVersion(localFileName, libraryVersion);
+            logger.info("原生库下载完成: " + localFileName);
+            return targetPath.toFile();
+        } catch (Exception e) {
+            logger.error("下载原生库失败: " + downloadFileName, e);
+            try {
+                Files.deleteIfExists(Paths.get(gameDirectory, localFileName + ".download"));
+            } catch (Exception ignored) {}
+            return null;
+        }
+    }
+private void LoadLibrary(File file) {
+    if (isArm64 && isAndroid) {
+        try {
+            File targetDir = new File(
+                "/data/data/com.tungsten.fcl/cache/mmdskin-native"
+            );
+            targetDir.mkdirs();
+
+            File target = new File(targetDir, file.getName());
+
+            
+            if (!target.exists() || target.length() != file.length()) {
+                Files.copy(
+                    file.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                );
+            }
+
+            System.load(target.getAbsolutePath());
+            return;
+        } catch (Exception e) {
+            throw new UnsatisfiedLinkError(
+                "Android native 重定向加载失败: " + e.getMessage()
+            );
+        }
+    }
+
+    // 桌面 / 非 Android 维持原行为
+    System.load(file.getAbsolutePath());
+}
+    private void Init() {
+        String resourcePath;
+        String fileName;
+        String downloadFileName;
+        
+        if (isWindows) {
+            String archDir = isArm64 ? "windows-arm64" : "windows-x64";
+            logger.info("Windows Env Detected! Arch: " + archDir);
+            resourcePath = "/natives/" + archDir + "/mmd_engine.dll";
+            fileName = "mmd_engine.dll";
+            downloadFileName = "mmd_engine-" + archDir + ".dll";
+        } else if (isMacOS) {
+            String archDir = isArm64 ? "macos-arm64" : "macos-x64";
+            logger.info("macOS Env Detected! Arch: " + archDir);
+            resourcePath = "/natives/" + archDir + "/libmmd_engine.dylib";
+            fileName = "libmmd_engine.dylib";
+            downloadFileName = "libmmd_engine-" + archDir + ".dylib";
+        } else if (isLinux) {
+            String archDir = isArm64 ? "linux-arm64" : "linux-x64";
+            logger.info("Linux Env Detected! Arch: " + archDir);
+            resourcePath = "/natives/" + archDir + "/libmmd_engine.so";
+            fileName = "libmmd_engine.so";
+            downloadFileName = "libmmd_engine-" + archDir + ".so";
+        } else {
+            String osName = System.getProperty("os.name");
+            logger.error("不支持的操作系统: " + osName);
+            throw new UnsupportedOperationException("Unsupported OS: " + osName);
+        }
+        
+        File libFile = new File(gameDirectory, fileName);
+        
+        // 1. 优先从模组内置资源提取（确保版本一致）
+        File extracted = extractNativeLibrary(resourcePath, fileName);
+        if (extracted != null) {
+            try {
+                LoadLibrary(extracted);
+                return;
+            } catch (Error e) {
+                logger.warn("内置库加载失败，尝试下载: " + e.getMessage());
+            }
+        }
+        
+        // 2. 内置资源不可用时，从 GitHub Release 自动下载
+        File downloaded = downloadNativeLibrary(downloadFileName, fileName);
+        if (downloaded != null) {
+            try {
+                LoadLibrary(downloaded);
+                return;
+            } catch (Error e) {
+                logger.warn("下载的库加载失败: " + e.getMessage());
+            }
+        }
+        
+        // 3. 回退到游戏目录的外部文件（用户自定义版本）
+        if (libFile.exists()) {
+            try {
+                LoadLibrary(libFile);
+                logger.info("已从游戏目录加载原生库: " + fileName);
+                return;
+            } catch (Error e) {
+                logger.error("外部库文件也无法加载: " + e.getMessage());
+            }
+        }
+        
+        // 4. 全部失败
+        throw new UnsatisfiedLinkError("无法加载原生库: " + fileName +
+            "，请检查网络连接或从 " + RELEASE_BASE_URL + " 手动下载");
+    }
+
+    public native String GetVersion();
+
+    public native byte ReadByte(long data, long pos);
+
+    public native void CopyDataToByteBuffer(ByteBuffer buffer, long data, long pos);
+
+    public native long LoadModelPMX(String filename, String dir, long layerCount);
+
+    public native long LoadModelPMD(String filename, String dir, long layerCount);
+
+    public native void DeleteModel(long model);
+
+    public native void UpdateModel(long model, float deltaTime);
+
+    public native long GetVertexCount(long model);
+
+    public native long GetPoss(long model);
+
+    public native long GetNormals(long model);
+
+    public native long GetUVs(long model);
+
+    public native long GetIndexElementSize(long model);
+
+    public native long GetIndexCount(long model);
+
+    public native long GetIndices(long model);
+
+    public native long GetMaterialCount(long model);
+
+    public native String GetMaterialTex(long model, long pos);
+
+    public native String GetMaterialSpTex(long model, long pos);
+
+    public native String GetMaterialToonTex(long model, long pos);
+
+    public native long GetMaterialAmbient(long model, long pos);
+
+    public native long GetMaterialDiffuse(long model, long pos);
+
+    public native long GetMaterialSpecular(long model, long pos);
+
+    public native float GetMaterialSpecularPower(long model, long pos);
+
+    public native float GetMaterialAlpha(long model, long pos);
+
+    public native long GetMaterialTextureMulFactor(long model, long pos);
+
+    public native long GetMaterialTextureAddFactor(long model, long pos);
+
+    public native int GetMaterialSpTextureMode(long model, long pos);
+
+    public native long GetMaterialSpTextureMulFactor(long model, long pos);
+
+    public native long GetMaterialSpTextureAddFactor(long model, long pos);
+
+    public native long GetMaterialToonTextureMulFactor(long model, long pos);
+
+    public native long GetMaterialToonTextureAddFactor(long model, long pos);
+
+    public native boolean GetMaterialBothFace(long model, long pos);
+
+    public native long GetSubMeshCount(long model);
+
+    public native int GetSubMeshMaterialID(long model, long pos);
+
+    public native int GetSubMeshBeginIndex(long model, long pos);
+
+    public native int GetSubMeshVertexCount(long model, long pos);
+
+    public native void ChangeModelAnim(long model, long anim, long layer);
+    
+    /**
+     * 带过渡地切换动画（矩阵插值过渡）
+     * 从当前骨骼姿态平滑过渡到新动画，避免动作切换时的突兀感
+     * @param model 模型句柄
+     * @param layer 动画层ID（0-3）
+     * @param anim 动画句柄（0表示清除动画）
+     * @param transitionTime 过渡时间（秒），推荐 0.2 ~ 0.5 秒
+     */
+    public native void TransitionLayerTo(long model, long layer, long anim, float transitionTime);
+
+    public native void ResetModelPhysics(long model);
+
+    public native long CreateMat();
+
+    public native void DeleteMat(long mat);
+
+    public native void GetRightHandMat(long model, long mat);
+
+    public native void GetLeftHandMat(long model, long mat);
+
+    public native long LoadTexture(String filename);
+
+    public native void DeleteTexture(long tex);
+
+    public native int GetTextureX(long tex);
+
+    public native int GetTextureY(long tex);
+
+    public native long GetTextureData(long tex);
+
+    public native boolean TextureHasAlpha(long tex);
+
+    public native long LoadAnimation(long model, String filename);
+
+    public native void DeleteAnimation(long anim);
+
+    public native void SetHeadAngle(long model, float x, float y, float z, boolean flag);
+    
+    /**
+     * 设置模型全局变换（用于人物移动时传递位置给物理系统）
+     * @param model 模型句柄
+     * @param m00-m33 4x4变换矩阵的16个元素（列主序）
+     */
+    public native void SetModelTransform(long model,
+        float m00, float m01, float m02, float m03,
+        float m10, float m11, float m12, float m13,
+        float m20, float m21, float m22, float m23,
+        float m30, float m31, float m32, float m33);
+    
+    /**
+     * 设置模型位置和朝向（简化版，用于惯性计算）
+     * @param model 模型句柄
+     * @param posX 位置X（已缩放）
+     * @param posY 位置Y（已缩放）
+     * @param posZ 位置Z（已缩放）
+     * @param yaw 人物朝向（弧度）
+     */
+    public native void SetModelPositionAndYaw(long model, float posX, float posY, float posZ, float yaw);
+
+    // ========== 眼球追踪相关 ==========
+    
+    /**
+     * 设置眼球追踪角度（眼睛看向摄像头）
+     * @param model 模型句柄
+     * @param eyeX 上下看的角度（弧度，正值向上）
+     * @param eyeY 左右看的角度（弧度，正值向左）
+     */
+    public native void SetEyeAngle(long model, float eyeX, float eyeY);
+    
+    /**
+     * 设置眼球最大转动角度
+     * @param model 模型句柄
+     * @param maxAngle 最大角度（弧度），默认 0.35（约 20 度）
+     */
+    public native void SetEyeMaxAngle(long model, float maxAngle);
+    
+    /**
+     * 启用/禁用眼球追踪
+     * @param model 模型句柄
+     * @param enabled 是否启用
+     */
+    public native void SetEyeTrackingEnabled(long model, boolean enabled);
+    
+    /**
+     * 获取眼球追踪是否启用
+     * @param model 模型句柄
+     * @return 是否启用
+     */
+    public native boolean IsEyeTrackingEnabled(long model);
+
+    // ========== 自动眨眼相关 ==========
+    
+    /**
+     * 启用/禁用自动眨眼
+     * @param model 模型句柄
+     * @param enabled 是否启用
+     */
+    public native void SetAutoBlinkEnabled(long model, boolean enabled);
+    
+    /**
+     * 获取自动眨眼是否启用
+     * @param model 模型句柄
+     * @return 是否启用
+     */
+    public native boolean IsAutoBlinkEnabled(long model);
+    
+    /**
+     * 设置眨眼参数
+     * @param model 模型句柄
+     * @param interval 眨眼间隔（秒），默认 4.0
+     * @param duration 眨眼持续时间（秒），默认 0.15
+     */
+    public native void SetBlinkParams(long model, float interval, float duration);
+
+    // ========== 物理系统相关 ==========
+    
+    /**
+     * 初始化物理系统（模型加载时自动调用，通常不需要手动调用）
+     * @param model 模型句柄
+     * @return 是否成功
+     */
+    public native boolean InitPhysics(long model);
+    
+    /**
+     * 重置物理系统（将所有刚体重置到初始位置）
+     * @param model 模型句柄
+     */
+    public native void ResetPhysics(long model);
+    
+    /**
+     * 启用/禁用物理
+     * @param model 模型句柄
+     * @param enabled 是否启用
+     */
+    public native void SetPhysicsEnabled(long model, boolean enabled);
+    
+    /**
+     * 获取物理是否启用
+     * @param model 模型句柄
+     * @return 是否启用
+     */
+    public native boolean IsPhysicsEnabled(long model);
+    
+    /**
+     * 获取物理系统是否已初始化
+     * @param model 模型句柄
+     * @return 是否已初始化
+     */
+    public native boolean HasPhysics(long model);
+    
+    /**
+     * 获取物理调试信息（JSON格式）
+     * @param model 模型句柄
+     * @return JSON字符串，包含刚体和关节信息
+     */
+    public native String GetPhysicsDebugInfo(long model);
+    
+    // ========== 材质可见性控制（脱外套等功能） ==========
+    
+    /**
+     * 获取材质是否可见
+     * @param model 模型句柄
+     * @param index 材质索引
+     * @return 是否可见
+     */
+    public native boolean IsMaterialVisible(long model, int index);
+    
+    /**
+     * 设置材质可见性
+     * @param model 模型句柄
+     * @param index 材质索引
+     * @param visible 是否可见
+     */
+    public native void SetMaterialVisible(long model, int index, boolean visible);
+    
+    /**
+     * 根据材质名称设置可见性（支持部分匹配）
+     * @param model 模型句柄
+     * @param name 材质名称（部分匹配）
+     * @param visible 是否可见
+     * @return 匹配的材质数量
+     */
+    public native int SetMaterialVisibleByName(long model, String name, boolean visible);
+    
+    /**
+     * 设置所有材质可见性
+     * @param model 模型句柄
+     * @param visible 是否可见
+     */
+    public native void SetAllMaterialsVisible(long model, boolean visible);
+    
+    /**
+     * 获取材质名称
+     * @param model 模型句柄
+     * @param index 材质索引
+     * @return 材质名称
+     */
+    public native String GetMaterialName(long model, int index);
+    
+    /**
+     * 获取所有材质名称（JSON数组格式）
+     * @param model 模型句柄
+     * @return JSON数组字符串
+     */
+    public native String GetMaterialNames(long model);
+    
+    // ========== GPU 蒙皮相关 ==========
+    
+    /**
+     * 获取骨骼数量
+     * @param model 模型句柄
+     * @return 骨骼数量
+     */
+    public native int GetBoneCount(long model);
+    
+    /**
+     * 获取蒙皮矩阵数据指针（用于 GPU 蒙皮）
+     * @param model 模型句柄
+     * @return 蒙皮矩阵数组指针（每个矩阵 16 个 float）
+     */
+    public native long GetSkinningMatrices(long model);
+    
+    /**
+     * 复制蒙皮矩阵到 ByteBuffer（线程安全）
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区（需要足够大小：骨骼数 * 64 字节）
+     * @return 复制的骨骼数量
+     */
+    public native int CopySkinningMatricesToBuffer(long model, java.nio.ByteBuffer buffer);
+    
+    /**
+     * 获取顶点骨骼索引数据指针（ivec4 格式）
+     * @param model 模型句柄
+     * @return 骨骼索引数组指针（每顶点 4 个 int）
+     */
+    public native long GetBoneIndices(long model);
+    
+    /**
+     * 复制骨骼索引到 ByteBuffer（线程安全）
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区（需要 vertexCount * 16 字节）
+     * @param vertexCount 顶点数量
+     * @return 复制的顶点数量
+     */
+    public native int CopyBoneIndicesToBuffer(long model, java.nio.ByteBuffer buffer, int vertexCount);
+    
+    /**
+     * 获取顶点骨骼权重数据指针（vec4 格式）
+     * @param model 模型句柄
+     * @return 骨骼权重数组指针（每顶点 4 个 float）
+     */
+    public native long GetBoneWeights(long model);
+    
+    /**
+     * 复制骨骼权重到 ByteBuffer（线程安全）
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区（需要 vertexCount * 16 字节）
+     * @param vertexCount 顶点数量
+     * @return 复制的顶点数量
+     */
+    public native int CopyBoneWeightsToBuffer(long model, java.nio.ByteBuffer buffer, int vertexCount);
+    
+    /**
+     * 获取原始顶点位置数据指针（未蒙皮）
+     * @param model 模型句柄
+     * @return 原始位置数组指针
+     */
+    public native long GetOriginalPositions(long model);
+    
+    /**
+     * 复制原始顶点位置到 ByteBuffer（线程安全）
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区（需要 vertexCount * 12 字节）
+     * @param vertexCount 顶点数量
+     * @return 复制的顶点数量
+     */
+    public native int CopyOriginalPositionsToBuffer(long model, java.nio.ByteBuffer buffer, int vertexCount);
+    
+    /**
+     * 获取原始法线数据指针（未蒙皮）
+     * @param model 模型句柄
+     * @return 原始法线数组指针
+     */
+    public native long GetOriginalNormals(long model);
+    
+    /**
+     * 复制原始法线到 ByteBuffer（线程安全）
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区（需要 vertexCount * 12 字节）
+     * @param vertexCount 顶点数量
+     * @return 复制的顶点数量
+     */
+    public native int CopyOriginalNormalsToBuffer(long model, java.nio.ByteBuffer buffer, int vertexCount);
+    
+    /**
+     * 获取 GPU 蒙皮调试信息
+     * @param model 模型句柄
+     * @return 调试信息字符串
+     */
+    public native String GetGpuSkinningDebugInfo(long model);
+    
+    /**
+     * 仅更新动画（不执行 CPU 蒙皮，用于 GPU 蒙皮模式）
+     * @param model 模型句柄
+     * @param deltaTime 时间增量（秒）
+     */
+    public native void UpdateAnimationOnly(long model, float deltaTime);
+    
+    /**
+     * 初始化 GPU 蒙皮数据（模型加载后调用一次）
+     * @param model 模型句柄
+     */
+    public native void InitGpuSkinningData(long model);
+    
+    // ========== GPU Morph 相关 ==========
+    
+    /**
+     * 初始化 GPU Morph 数据
+     * 将稀疏的顶点 Morph 偏移转换为密集格式，供 GPU Compute Shader 使用
+     * @param model 模型句柄
+     */
+    public native void InitGpuMorphData(long model);
+    
+    /**
+     * 获取顶点 Morph 数量
+     * @param model 模型句柄
+     * @return 顶点 Morph 数量
+     */
+    public native int GetVertexMorphCount(long model);
+    
+    /**
+     * 获取 GPU Morph 偏移数据指针（密集格式：morph_count * vertex_count * 3）
+     * @param model 模型句柄
+     * @return 数据指针
+     */
+    public native long GetGpuMorphOffsets(long model);
+    
+    /**
+     * 获取 GPU Morph 偏移数据大小（字节）
+     * @param model 模型句柄
+     * @return 数据大小
+     */
+    public native long GetGpuMorphOffsetsSize(long model);
+    
+    /**
+     * 获取 GPU Morph 权重数据指针
+     * @param model 模型句柄
+     * @return 数据指针
+     */
+    public native long GetGpuMorphWeights(long model);
+    
+    /**
+     * 同步 GPU Morph 权重（从动画系统更新到 GPU 缓冲区）
+     * @param model 模型句柄
+     */
+    public native void SyncGpuMorphWeights(long model);
+    
+    /**
+     * 复制 GPU Morph 偏移数据到 ByteBuffer
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区
+     * @return 复制的字节数
+     */
+    public native long CopyGpuMorphOffsetsToBuffer(long model, java.nio.ByteBuffer buffer);
+    
+    /**
+     * 复制 GPU Morph 权重数据到 ByteBuffer
+     * @param model 模型句柄
+     * @param buffer 目标缓冲区
+     * @return 复制的 Morph 数量
+     */
+    public native int CopyGpuMorphWeightsToBuffer(long model, java.nio.ByteBuffer buffer);
+    
+    /**
+     * 获取 GPU Morph 是否已初始化
+     * @param model 模型句柄
+     * @return 是否已初始化
+     */
+    public native boolean IsGpuMorphInitialized(long model);
+    
+    // ========== VPD 表情预设相关 ==========
+    
+    /**
+     * 应用 VPD 表情/姿势预设到模型
+     * 
+     * VPD 文件可以同时包含骨骼姿势（Bone）和表情权重（Morph）数据，此函数会同时应用两者。
+     * 
+     * @param model 模型句柄
+     * @param filename VPD 文件路径
+     * @return 编码值: 高16位为骨骼匹配数，低16位为 Morph 匹配数
+     *         解码方式: boneCount = (result >> 16) & 0xFFFF; morphCount = result & 0xFFFF;
+     *         -1 表示加载失败，-2 表示模型不存在
+     */
+    public native int ApplyVpdMorph(long model, String filename);
+    
+    /**
+     * 重置所有 Morph 权重为 0
+     * @param model 模型句柄
+     */
+    public native void ResetAllMorphs(long model);
+    
+    /**
+     * 通过名称设置单个 Morph 权重
+     * @param model 模型句柄
+     * @param morphName Morph 名称
+     * @param weight 权重值 (0.0-1.0)
+     * @return 是否成功
+     */
+    public native boolean SetMorphWeightByName(long model, String morphName, float weight);
+    
+    /**
+     * 获取 Morph 数量
+     * @param model 模型句柄
+     * @return Morph 数量
+     */
+    public native long GetMorphCount(long model);
+    
+    /**
+     * 获取 Morph 名称（通过索引）
+     * @param model 模型句柄
+     * @param index Morph 索引
+     * @return Morph 名称
+     */
+    public native String GetMorphName(long model, int index);
+    
+    /**
+     * 获取 Morph 权重（通过索引）
+     * @param model 模型句柄
+     * @param index Morph 索引
+     * @return 权重值
+     */
+    public native float GetMorphWeight(long model, int index);
+    
+    /**
+     * 设置 Morph 权重（通过索引）
+     * @param model 模型句柄
+     * @param index Morph 索引
+     * @param weight 权重值 (0.0-1.0)
+     */
+    public native void SetMorphWeight(long model, int index, float weight);
+    
+    // ========== 物理配置相关 ==========
+    
+    /**
+     * 设置全局物理配置（实时调整，保存时调用）
+     * @param gravityY 重力 Y 分量（负数向下）
+     * @param physicsFps 物理模拟 FPS
+     * @param maxSubstepCount 每帧最大子步数
+     * @param solverIterations 求解器迭代次数
+     * @param pgsIterations PGS 迭代次数
+     * @param maxCorrectiveVelocity 最大修正速度
+     * @param linearDampingScale 线性阻尼缩放
+     * @param angularDampingScale 角速度阻尼缩放
+     * @param massScale 质量缩放
+     * @param linearSpringStiffnessScale 线性弹簧刚度缩放
+     * @param angularSpringStiffnessScale 角度弹簧刚度缩放
+     * @param linearSpringDampingFactor 线性弹簧阻尼系数
+     * @param angularSpringDampingFactor 角度弹簧阻尼系数
+     * @param inertiaStrength 惯性效果强度
+     * @param maxLinearVelocity 最大线速度
+     * @param maxAngularVelocity 最大角速度
+     * @param jointsEnabled 是否启用关节
+     * @param debugLog 是否输出调试日志
+     */
+    public native void SetPhysicsConfig(
+        float gravityY,
+        float physicsFps,
+        int maxSubstepCount,
+        int solverIterations,
+        int pgsIterations,
+        float maxCorrectiveVelocity,
+        float linearDampingScale,
+        float angularDampingScale,
+        float massScale,
+        float linearSpringStiffnessScale,
+        float angularSpringStiffnessScale,
+        float linearSpringDampingFactor,
+        float angularSpringDampingFactor,
+        float inertiaStrength,
+        float maxLinearVelocity,
+        float maxAngularVelocity,
+        boolean jointsEnabled,
+        boolean debugLog
+    );
+}
